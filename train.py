@@ -32,8 +32,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0 # 初始化迭代次数
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    # Preload cameras at multiple resolution scales: 4x down, 2x down, and full
-    scene = Scene(dataset, gaussians, resolution_scales=[4.0, 2.0, 1.0])
+    use_resolution_schedule = (dataset.resolution == -1)
+    if use_resolution_schedule:
+        # Default mode: warm up with 1/4 -> 1/2 -> full resolution.
+        scene = Scene(dataset, gaussians, resolution_scales=[4.0, 2.0, 1.0])
+    else:
+        # Explicit --resolution mode: keep one fixed resolution for the whole run.
+        scene = Scene(dataset, gaussians, resolution_scales=[1.0])
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -45,17 +50,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    viewpoint_stack = None
-    # resolution schedule: first 3000 iters -> downscale 4, next 2000 iters -> downscale 2, then full
-    def _scale_for_iteration(it):
-        if it <= 3000:
-            return 4.0
-        elif it <= 3000 + 2000:
-            return 2.0
-        else:
-            return 1.0
+    # Always save point clouds at these milestones for comparison across stages.
+    saving_iterations = sorted(set(list(saving_iterations) + [3000, 6000, opt.iterations]))
 
-    current_scale = _scale_for_iteration(first_iter)
+    viewpoint_stack = None
+    if use_resolution_schedule:
+        # Resolution schedule:
+        # 1 ~ 3000   : scale 4.0 (1/4 resolution)
+        # 3001 ~ 6000: scale 2.0 (1/2 resolution)
+        # 6001 ~ end  : scale 1.0 (full resolution)
+        def _scale_for_iteration(it):
+            if it <= 3000:
+                return 4.0
+            elif it <= 6000:
+                return 2.0
+            else:
+                return 1.0
+
+        current_scale = _scale_for_iteration(first_iter)
+        print("[Train] Using resolution schedule: 4.0 -> 2.0 -> 1.0")
+    else:
+        current_scale = 1.0
+        print(f"[Train] Using fixed resolution from --resolution={dataset.resolution}")
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
@@ -74,9 +90,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         # 在每个epoch里面随机抽取一个相机，只对这一个相机视角渲染后计算loss
-        # Pick a random Camera from the camera set matching current resolution schedule
-        new_scale = _scale_for_iteration(iteration)
+        # Pick a random Camera from the camera set matching the current mode.
+        new_scale = _scale_for_iteration(iteration) if use_resolution_schedule else 1.0
         if new_scale != current_scale or not viewpoint_stack:
+            print(f"[Train] Iteration {iteration}: switch to resolution scale {new_scale}")
             current_scale = new_scale
             viewpoint_stack = scene.getTrainCameras(scale=current_scale).copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
@@ -133,7 +150,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print("\n[ITER {}] Saving point cloud snapshot".format(iteration))
                 scene.save(iteration)
 
 
@@ -220,6 +237,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
+        # Evaluate on the full test split; keep a small train subset for reference.
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
@@ -278,8 +296,8 @@ if __name__ == "__main__":
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000, 6_000,12_000 ,15_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
