@@ -32,8 +32,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0 # 初始化迭代次数
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    # Preload cameras at multiple resolution scales: 4x down, 2x down, and full
-    scene = Scene(dataset, gaussians, resolution_scales=[4.0, 2.0, 1.0])
+    scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -46,16 +45,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
-    # resolution schedule: first 3000 iters -> downscale 4, next 2000 iters -> downscale 2, then full
-    def _scale_for_iteration(it):
-        if it <= 3000:
-            return 4.0
-        elif it <= 3000 + 2000:
-            return 2.0
-        else:
-            return 1.0
 
-    current_scale = _scale_for_iteration(first_iter)
+    current_scale = None
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
@@ -75,10 +66,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # 在每个epoch里面随机抽取一个相机，只对这一个相机视角渲染后计算loss
         # Pick a random Camera from the camera set matching current resolution schedule
-        new_scale = _scale_for_iteration(iteration)
-        if new_scale != current_scale or not viewpoint_stack:
-            current_scale = new_scale
-            viewpoint_stack = scene.getTrainCameras(scale=current_scale).copy()
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
