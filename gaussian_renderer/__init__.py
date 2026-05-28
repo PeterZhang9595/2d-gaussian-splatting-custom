@@ -16,6 +16,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from utils.point_utils import depth_to_normal
 
+# 将高斯点云光栅化器渲染为图像，并且计算一组辅助图（深度、法线、alpha)，返回字典化结果供训练/正则化使用
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
     Render the scene. 
@@ -107,11 +108,19 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
-    rets =  {"render": rendered_image,
-            "viewspace_points": means2D,
-            "visibility_filter" : radii > 0,
-            "radii": radii,
+    rets =  {"render": rendered_image, # 渲染的图像
+            "viewspace_points": means2D, # 屏幕空间点像素坐标
+            "visibility_filter" : radii > 0, # 可见性掩码
+            "radii": radii, # 每个点的半径
     }
+
+
+    # 这里需要关注的是allmap的组成（需要对照原论文搞清楚它们的具体意义）
+    # allmap[0]: 累积的期望深度：depth*weight的加权和，需要除以alpha?
+    # allmap[1]: 累计alpha
+    # allmap[2:5]: 加权法线分量
+    # allmap[5]: 中位深度
+    # allmap[6]: 深度失真
 
 
     # additional regularizations
@@ -148,7 +157,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
 
     rets.update({
-            'rend_alpha': render_alpha,
+            'rend_alpha': render_alpha, 
             'rend_normal': render_normal,
             'rend_dist': render_dist,
             'surf_depth': surf_depth,

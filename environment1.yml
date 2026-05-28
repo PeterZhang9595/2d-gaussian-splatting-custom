@@ -1,0 +1,15 @@
+name: surfel_splatting
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - ffmpeg=4.2.2
+  - pillow=10.2.0
+  - pip=23.3.1
+  - python=3.8.18
+  - pytorch=2.0.0
+  - torchaudio=2.0.0
+  - torchvision=0.15.0
+  - typing_extensions=4.9.0

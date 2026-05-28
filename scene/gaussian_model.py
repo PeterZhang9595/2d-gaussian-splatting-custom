@@ -24,6 +24,8 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 class GaussianModel:
 
     def setup_functions(self):
+        # 构建协方差矩阵，接受center,scaling,scaling_modifier,rotation作为参数
+        # 
         def build_covariance_from_scaling_rotation(center, scaling, scaling_modifier, rotation):
             RS = build_scaling_rotation(torch.cat([scaling * scaling_modifier, torch.ones_like(scaling)], dim=-1), rotation).permute(0,2,1)
             trans = torch.zeros((center.shape[0], 4, 4), dtype=torch.float, device="cuda")
@@ -32,30 +34,51 @@ class GaussianModel:
             trans[:, 3, 3] = 1
             return trans
         
+        # 使用exp函数把scaling系数映射到一个正数
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
         self.covariance_activation = build_covariance_from_scaling_rotation
+        
+        # 把不透明度激活函数设置为sigmoid
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
+
+        # 归一化旋转矩阵
         self.rotation_activation = torch.nn.functional.normalize
 
 
     def __init__(self, sh_degree : int):
+        # 球谐函数阶数
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        # 最大球谐函数阶数
+        self.max_sh_degree = sh_degree 
+
         self._xyz = torch.empty(0)
+        
+        # 决定点颜色
         self._features_dc = torch.empty(0)
+
+        # 决定点从不同视角看的时候会出现怎样的变化
         self._features_rest = torch.empty(0)
+
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+
         self.max_radii2D = torch.empty(0)
+
         self.xyz_gradient_accum = torch.empty(0)
+
         self.denom = torch.empty(0)
         self.optimizer = None
+
+        # 百分比密度
         self.percent_dense = 0
+
+        # 空间学习率
         self.spatial_lr_scale = 0
+        
         self.setup_functions()
 
     def capture(self):
@@ -122,27 +145,47 @@ class GaussianModel:
             self.active_sh_degree += 1
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
+
         self.spatial_lr_scale = spatial_lr_scale
+
+        # 点云位置、颜色转tensor送入GPU
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+
+        # RGB三个通道球谐函数的所有系数
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
+
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+
+        # (N,2)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+        # 这里使用的是[0,1]均匀分布进行初始化,(N,4)
         rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
+        # (N,3) 点云坐标
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+
+        # (N,1,3) RGB三个通道的直流分量以及高阶分量
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+
+        # 缩放系数 (N,2)
         self._scaling = nn.Parameter(scales.requires_grad_(True))
+
+        # 旋转四元数(N,4)
         self._rotation = nn.Parameter(rots.requires_grad_(True))
+
+        # 透明度 (N,1) 
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+
+        # 投影到2D平面时候每个2DGS最大的半径，(N,)
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -393,7 +436,10 @@ class GaussianModel:
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
+        # 先标出不透明度太低的点。
         prune_mask = (self.get_opacity < min_opacity).squeeze()
+
+        # 把屏幕空间太大以及世界空间尺度太大的点都删掉
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
