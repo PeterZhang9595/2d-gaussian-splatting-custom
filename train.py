@@ -90,6 +90,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
+        ratio_loss = lambda_ratio * gaussians.get_scaling()
+
         # loss
         total_loss = loss + dist_loss + normal_loss
         
