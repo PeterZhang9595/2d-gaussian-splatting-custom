@@ -12,6 +12,7 @@
 import os
 import random
 import json
+import time
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -80,11 +81,10 @@ class Scene:
          # getNerfppNorm读取所有相机的中心点位置到最远camera的距离 * 1.1
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
-        for resolution_scale in resolution_scales:
-            print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
-            print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+        # Store scene info and args; create camera lists lazily per-resolution on demand
+        self._scene_info = scene_info
+        self._resolution_scales = resolution_scales
+        self._args = args
         
         # 直接读取对应的已经迭代出来的场景
         if self.loaded_iter:
@@ -101,7 +101,19 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):
+        if scale not in self.train_cameras:
+            start_time = time.perf_counter()
+            print(f"[Scene] Building train cameras for scale={scale}...")
+            self.train_cameras[scale] = cameraList_from_camInfos(self._scene_info.train_cameras, scale, self._args)
+            elapsed = time.perf_counter() - start_time
+            print(f"[Scene] Finished train cameras for scale={scale} in {elapsed:.2f}s ({len(self.train_cameras[scale])} cameras)")
         return self.train_cameras[scale]
 
     def getTestCameras(self, scale=1.0):
+        if scale not in self.test_cameras:
+            start_time = time.perf_counter()
+            print(f"[Scene] Building test cameras for scale={scale}...")
+            self.test_cameras[scale] = cameraList_from_camInfos(self._scene_info.test_cameras, scale, self._args)
+            elapsed = time.perf_counter() - start_time
+            print(f"[Scene] Finished test cameras for scale={scale} in {elapsed:.2f}s ({len(self.test_cameras[scale])} cameras)")
         return self.test_cameras[scale]
