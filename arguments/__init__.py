@@ -50,16 +50,20 @@ class ModelParams(ParamGroup):
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
+        self.depth_data_path = ""
         self._resolution = -1
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+        self.depth_prior_reciprocal = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
         g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
+        if getattr(g, "depth_data_path", ""):
+            g.depth_data_path = os.path.abspath(g.depth_data_path)
         return g
 
 class PipelineParams(ParamGroup):

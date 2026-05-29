@@ -11,6 +11,9 @@
 
 import os
 import torch
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -20,6 +23,7 @@ from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
+from utils.point_utils import depth_to_normal
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
@@ -27,6 +31,54 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+
+def load_depth_prior_normal(viewpoint_cam, depth_data_path, depth_prior_reciprocal, render_alpha, debug=False, iteration=None):
+    depth_candidates = [
+        os.path.join(depth_data_path, viewpoint_cam.image_name + "_depth.npy"),
+        os.path.join(depth_data_path, viewpoint_cam.image_name + ".npy"),
+        os.path.join(depth_data_path, viewpoint_cam.image_name + "_depth.png"),
+        os.path.join(depth_data_path, viewpoint_cam.image_name + ".png"),
+    ]
+    depth_path = next((path for path in depth_candidates if os.path.exists(path)), None)
+    if depth_path is None:
+        depth_path = depth_candidates[0]
+        raise FileNotFoundError(f"Depth prior not found for {viewpoint_cam.image_name}: {depth_path}")
+
+    if depth_path.endswith(".npy"):
+        depth_array = np.load(depth_path)
+    else:
+        depth_array = np.asarray(Image.open(depth_path))
+
+    if depth_array.ndim == 3:
+        depth_array = depth_array[..., 0]
+
+    if debug:
+        print(
+            f"[Depth Prior][iter {iteration}] view={viewpoint_cam.image_name} file={os.path.basename(depth_path)} "
+            f"shape={tuple(depth_array.shape)} dtype={depth_array.dtype} min={float(np.min(depth_array)):.6f} "
+            f"max={float(np.max(depth_array)):.6f} mean={float(np.mean(depth_array)):.6f} reciprocal={depth_prior_reciprocal}"
+        )
+
+    depth = torch.from_numpy(depth_array).float().cuda()
+    if depth.dim() == 2:
+        depth = depth.unsqueeze(0)
+
+    target_size = (viewpoint_cam.image_height, viewpoint_cam.image_width)
+    if depth.shape[-2:] != target_size:
+        depth = F.interpolate(depth.unsqueeze(0), size=target_size, mode="bilinear", align_corners=False).squeeze(0)
+
+    if depth_prior_reciprocal:
+        depth = torch.reciprocal(depth.clamp_min(1e-6))
+
+    if debug:
+        print(
+            f"[Depth Prior][iter {iteration}] view={viewpoint_cam.image_name} depth_after min={float(depth.min().item()):.6f} "
+            f"max={float(depth.max().item()):.6f} mean={float(depth.mean().item()):.6f}"
+        )
+
+    depth_normal = depth_to_normal(viewpoint_cam, depth).permute(2, 0, 1)
+    return depth_normal * render_alpha.detach()
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0 # 初始化迭代次数
@@ -40,6 +92,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    if dataset.depth_prior_reciprocal and not dataset.depth_data_path:
+        raise ValueError("depth_data_path must be set when depth_prior_reciprocal is True")
+
+    print(
+        f"[Depth Prior] enabled={dataset.depth_prior_reciprocal} depth_data_path='{dataset.depth_data_path}' "
+        f"will_use_prior_normal={dataset.depth_prior_reciprocal}"
+    )
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -79,21 +139,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
         # regularization
-        lambda_normal = opt.lambda_normal if iteration > 5000 else 0.0
+        lambda_normal = opt.lambda_normal if iteration > 0 else 0.0
         lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
         lambda_ratio = opt.lambda_ratio if iteration <3000 else 0.0
 
         rend_dist = render_pkg["rend_dist"]
         rend_normal  = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
+        if dataset.depth_prior_reciprocal:
+            surf_normal = load_depth_prior_normal(
+                viewpoint_cam,
+                dataset.depth_data_path,
+                dataset.depth_prior_reciprocal,
+                render_pkg["rend_alpha"],
+                debug=iteration <= 3,
+                iteration=iteration,
+            )
+        else:
+            surf_normal = render_pkg['surf_normal']
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
-        ratio_loss = lambda_ratio * gaussians.get_scaling()
+        ratio_loss = lambda_ratio * torch.mean((gaussians._scaling[:,0] - gaussians._scaling[:,1])**2)
 
         # loss
-        total_loss = loss + dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss + ratio_loss
         
         total_loss.backward()
 
