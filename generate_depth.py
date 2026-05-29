@@ -18,11 +18,11 @@ import argparse
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
 # 模仿原代码中的 PILtoTorch 逻辑，但适配 transformers processor
-def get_scaled_resolution(orig_w, orig_h, resolution=-1):
+def get_scaled_resolution(orig_w, orig_h, resolution=1):
     """
     模仿 Inria 逻辑：如果宽度超过 1600，则缩放到 1600
     """
-    if resolution == -1:
+    if resolution == 1:
         if orig_w > 1600:
             global_down = orig_w / 1600
         else:

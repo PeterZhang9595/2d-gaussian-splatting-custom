@@ -6,6 +6,30 @@
 
 This repo contains the official implementation for the paper "2D Gaussian Splatting for Geometrically Accurate Radiance Fields". Our work represents a scene with a set of 2D oriented disks (surface elements) and rasterizes the surfels with [perspective correct differentiable raseterization](https://colab.research.google.com/drive/1qoclD7HJ3-o0O1R8cvV3PxLhoDCMsH8W?usp=sharing). Our work also develops regularizations that enhance the reconstruction quality. We also devise meshing approaches for Gaussian splatting.
 
+## Custom Changes
+本小组复现过程中，对原代码作出了以下三点改动：
+- 增加了resolution schedule功能。
+- 增加了对2dgs的scaling比值的约束(已经hard-code进代码里面)。
+- 引入Depth Anything作为单目视觉深度先验，使得可以在训练开始就加入normal loss。
+
+### resolution schedule
+默认按照$resolution=1$运行。
+```bash
+--resolution 4 # 固定分辨率训练
+--resolution_schedule 4,2,1 # 如需传入列表，请按照这个格式传入
+```
+
+### depth prior
+需要先从hugging-face上下载depth-anything的模型。
+运行```generate_depth.py```生成对应的深度图。
+```bash
+python generate_depth.py -i input_path -o output_path -m model_name 
+```
+然后在训练的时候，需要在命令里加入：
+```bash
+--depth_data_path depth_path --depth_prior_reciprocal
+```
+
 
 ## ⭐ New Features 
 - 2025/12/19: Our work is featured in an in-depth blog post on [LearnOpenCV](https://learnopencv.com/)! Thanks to [Shubham Anand](https://www.linkedin.com/in/shubham-anand-91a10b211/).

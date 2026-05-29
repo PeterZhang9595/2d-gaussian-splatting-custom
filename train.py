@@ -84,13 +84,46 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter = 0 # 初始化迭代次数
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
-    use_resolution_schedule = (dataset.resolution == -1)
-    if use_resolution_schedule:
-        # Default mode: warm up with 1/4 -> 1/2 -> full resolution.
-        scene = Scene(dataset, gaussians, resolution_scales=[4.0, 2.0, 1.0])
+    # Determine resolution schedule. Priority:
+    # 1) If user provided dataset.resolution_schedule (comma-separated string), use it.
+    # 2) Else if dataset.resolution == -1, use default schedule [4,2,1].
+    # 3) Else fixed resolution mode.
+    if getattr(dataset, 'resolution_schedule', None):
+        # parse string like "8,4,2,1" or "[8,4,2,1]"
+        s = str(dataset.resolution_schedule).strip()
+        s = s.strip('[]')
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        try:
+            resolution_list = [float(p) for p in parts]
+        except Exception:
+            raise ValueError(f"Invalid --resolution_schedule value: {dataset.resolution_schedule}")
+        use_resolution_schedule = True
+        scene = Scene(dataset, gaussians, resolution_scales=resolution_list)
+        custom_resolution_list = resolution_list
     else:
-        # Explicit --resolution mode: keep one fixed resolution for the whole run.
-        scene = Scene(dataset, gaussians, resolution_scales=[1.0])
+        use_resolution_schedule = (dataset.resolution == -1)
+        if use_resolution_schedule:
+            # Default mode: warm up with 1/4 -> 1/2 -> full resolution.
+            scene = Scene(dataset, gaussians, resolution_scales=[4.0, 2.0, 1.0])
+            custom_resolution_list = [4.0, 2.0, 1.0]
+        else:
+            # Explicit --resolution mode: allow user to pass a downsampling factor
+            # If user passed one of [1,2,4,8], treat it as the desired scale and
+            # set dataset.resolution to 1 so camera loader computes resolution = orig/(scale*1).
+            try:
+                user_r = float(dataset.resolution)
+            except Exception:
+                user_r = 1.0
+
+            if user_r in [1.0, 2.0, 4.0, 8.0]:
+                requested_scale = user_r
+                dataset.resolution = 1  # ensure loadCam uses scale to downsample
+                scene = Scene(dataset, gaussians, resolution_scales=[requested_scale])
+                custom_resolution_list = [requested_scale]
+            else:
+                # Treat resolution as an absolute width
+                scene = Scene(dataset, gaussians, resolution_scales=[1.0])
+                custom_resolution_list = [1.0]
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -119,19 +152,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 1 ~ 3000   : scale 4.0 (1/4 resolution)
         # 3001 ~ 6000: scale 2.0 (1/2 resolution)
         # 6001 ~ end  : scale 1.0 (full resolution)
+        # Create a mapping from iteration to the index in custom_resolution_list.
+        stages = len(custom_resolution_list)
+        it_per_stage = max(1, opt.iterations // stages)
+
         def _scale_for_iteration(it):
-            if it <= 3000:
-                return 4.0
-            elif it <= 6000:
-                return 2.0
-            else:
-                return 1.0
+            idx = min((it - 1) // it_per_stage, stages - 1)
+            return custom_resolution_list[idx]
 
         current_scale = _scale_for_iteration(first_iter)
-        print("[Train] Using resolution schedule: 4.0 -> 2.0 -> 1.0")
+        print(f"[Train] Using resolution schedule: {' -> '.join(str(int(x)) for x in custom_resolution_list)}")
     else:
-        current_scale = 1.0
-        print(f"[Train] Using fixed resolution from --resolution={dataset.resolution}")
+        # fixed mode: use the single entry in custom_resolution_list as the scale
+        current_scale = custom_resolution_list[0]
+        print(f"[Train] Using fixed resolution scale {current_scale} (from --resolution={dataset.resolution})")
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
@@ -151,7 +185,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # 在每个epoch里面随机抽取一个相机，只对这一个相机视角渲染后计算loss
         # Pick a random Camera from the camera set matching the current mode.
-        new_scale = _scale_for_iteration(iteration) if use_resolution_schedule else 1.0
+        new_scale = _scale_for_iteration(iteration) if use_resolution_schedule else current_scale
         if new_scale != current_scale or not viewpoint_stack:
             print(f"[Train] Iteration {iteration}: switch to resolution scale {new_scale}")
             current_scale = new_scale
@@ -373,8 +407,8 @@ if __name__ == "__main__":
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1000,2000,3000,5000,7_000,10000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1000,2000,3000,5000,7000,10000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1000,2000,3000,5000,7_000,10000,15000,30000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7000,30000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)

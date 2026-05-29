@@ -51,7 +51,8 @@ class ModelParams(ParamGroup):
         self._model_path = ""
         self._images = "images"
         self.depth_data_path = ""
-        self._resolution = -1
+        self.resolution_schedule = ""  # comma-separated list like "8,4,2,1"
+        self._resolution = 1
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
